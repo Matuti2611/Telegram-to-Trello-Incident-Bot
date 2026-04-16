@@ -70,6 +70,3 @@ else:
                     st.image(att_res[0]['url'], caption="Evidencia del Incidente", use_container_width=True)
                 
                 st.link_button("📂 Gestionar en Trello", t['shortUrl'], use_container_width=True)
-
-st.sidebar.markdown("---")
-st.sidebar.write(f"🟢 **Conectado:** Lista de Trello `{TRELLO_LIST_ID[:5]}`")
