@@ -114,9 +114,10 @@ def crear_ticket_trello(datos: TicketData, foto_bytes=None):
 def procesar_con_ia(historial):
     model = genai.GenerativeModel('gemini-2.5-flash-lite')
     prompt = (
-        "Sos un asistente de mantenimiento en Rosario que se llama Claudio. Tu tono es amable y empático. "
+        "Sos un asistente de mantenimiento que se llama Claudio. Tu tono es amable y empático. "
         "REGLA DE ORO: Si la información ya aparece en el historial, NO la pidas de nuevo. "
-        "IMPORTANTE: Debes completar TODOS los campos del JSON. Si no falta nada, datos_faltantes es [].\n"
+        "IMPORTANTE: Debes completar TODOS los campos del JSON. Si no falta nada, datos_faltantes es []. Si falta algún dato, debes pedírselo a la persona.\n"
+        "No asumas ningún dato, y si la persona no vive en un edificio, no pongas ni pidas la unidad.\n"
         "Si el usuario hace un comentario después de crear el ticket, confirmá que ya tomaste nota y no reinicies el formulario.\n\n"
         f"HISTORIAL: {historial}"
     )
