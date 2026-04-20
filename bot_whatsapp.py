@@ -5,8 +5,11 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from pydantic import BaseModel, Field
 
-# 1. Cargar variables de entorno
+# 1. CARGA DE CONFIGURACIÓN
 load_dotenv()
+app = Flask(__name__)
+
+# Credenciales
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
@@ -16,47 +19,34 @@ TRELLO_TOKEN = os.getenv("TRELLO_TOKEN")
 TRELLO_LIST_ID = os.getenv("TRELLO_LIST_ID")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
-# 2. Inicializar clientes
-app = Flask(__name__)
 genai.configure(api_key=GEMINI_API_KEY)
 
-# 3. Estructura de datos para IA
+# 2. ESQUEMA DE DATOS PARA IA
 class TicketData(BaseModel):
-    direccion: str = Field(description="Dirección de la propiedad o edificio")
-    unidad: str = Field(description="Departamento o unidad. Si es casa, 'N/A'")
-    categoria: str = Field(description="Plomeria, Electricidad, Limpieza, Ruidos, Otros")
+    direccion: str = Field(description="Dirección física detectada.")
+    unidad: str = Field(description="Depto/Piso o N/A.")
+    categoria: str = Field(description="Plomeria, Electricidad, Limpieza, Ruidos, Gas, Otros")
     urgencia: str = Field(description="Baja, Media, o Alta")
-    resumen_operativo: str = Field(description="Resumen corto del problema")
-    datos_faltantes: list[str] = Field(description="Campos faltantes: direccion, unidad, problema")
-
-# --- FUNCIONES DE APOYO ---
+    resumen_operativo: str = Field(description="Resumen corto para el técnico")
+    datos_faltantes: list[str] = Field(description="Lista de campos vacíos o faltantes")
+    respuesta_usuario: str = Field(description="Mensaje para el usuario")
+    
+# --- FUNCIONES DE SOPORTE ---
 
 def limpiar_numero(number):
-    """
-    Lógica para Argentina: Meta a veces manda el '9' pero no lo acepta para enviar.
-    Si el número empieza con 549..., le quitamos el 9.
-    """
+    """Ajuste para números de Argentina (quita el 9 intermedio)"""
     if number.startswith("549"):
         return "54" + number[3:]
     return number
 
 def enviar_whatsapp(texto, recipient_id):
-    # IMPORTANTE: Limpiamos el número antes de enviar
-    target_number = limpiar_numero(recipient_id)
-    
+    target = limpiar_numero(recipient_id)
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
-    data = {
-        "messaging_product": "whatsapp",
-        "to": target_number,
-        "type": "text",
-        "text": {"body": texto}
-    }
+    data = {"messaging_product": "whatsapp", "to": target, "type": "text", "text": {"body": texto}}
     res = requests.post(url, json=data, headers=headers)
     if res.status_code != 200:
-        print(f"❌ ERROR META ({res.status_code}): {res.text}")
-    else:
-        print(f"✅ Mensaje enviado a {target_number}")
+        print(f"❌ Error Envío Meta: {res.text}")
 
 def descargar_media_whatsapp(media_id):
     url_info = f"https://graph.facebook.com/v18.0/{media_id}"
@@ -68,101 +58,146 @@ def transcribir_audio(audio_bytes):
     try:
         url = "https://api.deepgram.com/v1/listen?model=nova-2&language=es&smart_format=true"
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}", "Content-Type": "audio/ogg"}
-        response = requests.post(url, headers=headers, data=audio_bytes)
-        return response.json()['results']['channels'][0]['alternatives'][0]['transcript']
+        res = requests.post(url, headers=headers, data=audio_bytes)
+        return res.json()['results']['channels'][0]['alternatives'][0]['transcript']
     except:
         return None
 
+# --- LÓGICA DE TRELLO CON ETIQUETAS REALES ---
+
 def crear_ticket_trello(datos: TicketData, foto_bytes=None):
     url = "https://api.trello.com/1/cards"
-    IDS_LABELS = {
-        "Plomeria": "69e0d71afef070af8a0ffee0", "Electricidad": "69e0d71afef070af8a0ffee1",
-        "Limpieza": "69e0d71afef070af8a0ffee2", "Ruidos": "69e0d71afef070af8a0ffee4",
-        "Otros": "69e0d71afef070af8a0ffee5", "Baja": "69e0e8640f16ad3791384b4d",
-        "Media": "69e0e85704cab7cb51e69cc6", "Alta": "69e0e8491e98a7b95ba3a5e9"
-    }
-    labels = [IDS_LABELS[datos.categoria]] if datos.categoria in IDS_LABELS else []
-    urg = "Media" if datos.urgencia == "Media" else datos.urgencia
-    if urg in IDS_LABELS: labels.append(IDS_LABELS[urg])
-
-    query = {
-        'key': TRELLO_KEY, 'token': TRELLO_TOKEN, 'idList': TRELLO_LIST_ID,
-        'name': f"[{datos.urgencia}] {datos.categoria} - {datos.direccion} ({datos.unidad})",
-        'desc': f"**Ubicación:** {datos.direccion}\n**Unidad:** {datos.unidad}\n\n**Resumen:** {datos.resumen_operativo}",
-        'idLabels': ",".join(labels), 'pos': 'top'
-    }
-    res = requests.post(url, params=query)
-    if res.status_code == 200 and foto_bytes:
-        card_id = res.json()['id']
-        requests.post(f"https://api.trello.com/1/cards/{card_id}/attachments", 
-                      params={'key': TRELLO_KEY, 'token': TRELLO_TOKEN}, 
-                      files={'file': ('foto.jpg', foto_bytes)})
-    return res.status_code == 200
-
-def procesar_con_ia(texto):
-    model = genai.GenerativeModel('gemini-3-flash-preview')
-    prompt = f"Analiza: '{texto}'. Extrae direccion, unidad, categoria, urgencia y resumen. Si falta algo indica en datos_faltantes."
-    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json", "response_schema": TicketData})
-    return TicketData.model_validate_json(response.text)
-
-# --- LÓGICA DE MEMORIA ---
-memoria = {}
-
-def flujo_principal(wa_id, texto, foto_bytes=None):
-    if wa_id not in memoria: memoria[wa_id] = {"textos": [], "foto": None}
-    if texto: memoria[wa_id]["textos"].append(texto)
-    if foto_bytes: memoria[wa_id]["foto"] = foto_bytes
     
-    historial = " ".join(memoria[wa_id]["textos"])
-    if not historial: return
+    # IDs extraídos de tu JSON de 'Gestión de Reclamos Rag & Roll'
+    IDS_LABELS = {
+        "Plomeria": "69e0d71afef070af8a0ffee0",
+        "Electricidad": "69e0d71afef070af8a0ffee1",
+        "Limpieza": "69e0d71afef070af8a0ffee2",
+        "Ruidos": "69e0d71afef070af8a0ffee4",
+        "Otros": "69e0d71afef070af8a0ffee5",
+        "Gas": "69e62be231e026c4a0b1227c",
+        "Alta": "69e0e8491e98a7b95ba3a5e9",
+        "Media": "69e0e85704cab7cb51e69cc6",
+        "Baja": "69e0e8640f16ad3791384b4d"
+    }
+    
+    # Buscamos los IDs de etiquetas correspondientes a lo que detectó la IA
+    labels = []
+    if datos.categoria in IDS_LABELS:
+        labels.append(IDS_LABELS[datos.categoria])
+    if datos.urgencia in IDS_LABELS:
+        labels.append(IDS_LABELS[datos.urgencia])
+    
+    query = {
+        'key': TRELLO_KEY, 
+        'token': TRELLO_TOKEN, 
+        'idList': TRELLO_LIST_ID,
+        'name': f"[{datos.urgencia}] {datos.categoria} - {datos.direccion}",
+        'desc': f"**Unidad:** {datos.unidad}\n\n**Descripción:** {datos.resumen_operativo}\n\n*Ticket creado por Incident Bot*",
+        'idLabels': ",".join(labels), 
+        'pos': 'top'
+    }
+    
+    res = requests.post(url, params=query)
+    if res.status_code == 200:
+        if foto_bytes:
+            card_id = res.json()['id']
+            requests.post(f"https://api.trello.com/1/cards/{card_id}/attachments", 
+                          params={'key': TRELLO_KEY, 'token': TRELLO_TOKEN}, 
+                          files={'file': ('foto.jpg', foto_bytes)})
+        return True
+    print(f"❌ Fallo Trello: {res.text}")
+    return False
 
+# --- PROCESAMIENTO IA ---
+
+def procesar_con_ia(historial):
+    model = genai.GenerativeModel('gemini-2.5-flash-lite')
+    prompt = (
+        "Sos un asistente de mantenimiento en Rosario que se llama Claudio. Tu tono es amable y empático. "
+        "REGLA DE ORO: Si la información ya aparece en el historial, NO la pidas de nuevo. "
+        "IMPORTANTE: Debes completar TODOS los campos del JSON. Si no falta nada, datos_faltantes es [].\n"
+        "Si el usuario hace un comentario después de crear el ticket, confirmá que ya tomaste nota y no reinicies el formulario.\n\n"
+        f"HISTORIAL: {historial}"
+    )
+    
+    response = model.generate_content(
+        prompt, 
+        generation_config={
+            "response_mime_type": "application/json", 
+            "response_schema": TicketData
+        }
+    )
+    
+    # Intentamos validar, si falla porque falta un campo, devolvemos un objeto básico
     try:
-        ticket = procesar_con_ia(historial)
-        if ticket.datos_faltantes:
-            ayuda = {"direccion": "📍 ¿Dirección?", "unidad": "🏢 ¿Unidad?", "problema": "📝 ¿Qué pasó?"}
-            enviar_whatsapp(ayuda.get(ticket.datos_faltantes[0], "🤖 ¿Me das más detalles?"), wa_id)
-            return
-
-        if crear_ticket_trello(ticket, memoria[wa_id]["foto"]):
-            enviar_whatsapp(f"✅ Ticket Registrado: {ticket.resumen_operativo}", wa_id)
-            memoria.pop(wa_id)
+        return TicketData.model_validate_json(response.text)
     except Exception as e:
-        print(f"Error procesando IA: {e}")
-        enviar_whatsapp("❌ Error al procesar tu solicitud.", wa_id)
+        print(f"⚠️ Error validando JSON: {e}. Intentando recuperación...")
+        # Esto es un "parche" por si Gemini devuelve basura
+        import json
+        raw_json = json.loads(response.text)
+        return TicketData(
+            direccion=raw_json.get("direccion", ""),
+            unidad=raw_json.get("unidad", ""),
+            categoria=raw_json.get("categoria", "Otros"),
+            urgencia=raw_json.get("urgencia", "Media"),
+            resumen_operativo=raw_json.get("resumen_operativo", ""),
+            datos_faltantes=raw_json.get("datos_faltantes", []),
+            respuesta_usuario=raw_json.get("respuesta_usuario", "Che, se me mezclaron los cables, ¿me repetís?")
+        )
 
-# --- WEBHOOK ENDPOINT ---
+# --- WEBHOOK Y MEMORIA ---
+memoria = {}
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
         if request.args.get("hub.verify_token") == VERIFY_TOKEN:
             return request.args.get("hub.challenge")
-        return "Error", 403
+        return "No autorizado", 403
 
     data = request.get_json()
     try:
-        if 'messages' in data['entry'][0]['changes'][0]['value']:
-            message = data['entry'][0]['changes'][0]['value']['messages'][0]
-            wa_id = message['from'] # Recibimos ej: 549341...
+        entry = data['entry'][0]['changes'][0]['value']
+        if 'messages' in entry:
+            msg = entry['messages'][0]
+            wa_id = msg['from']
             
-            if message['type'] == 'text':
-                flujo_principal(wa_id, message['text']['body'])
+            if wa_id not in memoria: memoria[wa_id] = {"textos": [], "foto": None}
             
-            elif message['type'] == 'audio':
-                audio_bytes = descargar_media_whatsapp(message['audio']['id'])
-                texto = transcribir_audio(audio_bytes)
-                if texto:
-                    enviar_whatsapp(f"🎤 Entendí: {texto}", wa_id)
-                    flujo_principal(wa_id, texto)
-            
-            elif message['type'] == 'image':
-                foto_bytes = descargar_media_whatsapp(message['image']['id'])
-                caption = message['image'].get('caption', '')
-                flujo_principal(wa_id, caption, foto_bytes=foto_bytes)
-                enviar_whatsapp("📸 Foto recibida.", wa_id)
+            texto_actual = ""
+            if msg['type'] == 'text':
+                texto_actual = msg['text']['body']
+            elif msg['type'] == 'audio':
+                audio = descargar_media_whatsapp(msg['audio']['id'])
+                texto_actual = transcribir_audio(audio)
+                if texto_actual: enviar_whatsapp(f"🎤 Entendí: {texto_actual}", wa_id)
+            elif msg['type'] == 'image':
+                memoria[wa_id]["foto"] = descargar_media_whatsapp(msg['image']['id'])
+                texto_actual = msg['image'].get('caption', '')
+                enviar_whatsapp("📸 Foto recibida, che.", wa_id)
+
+            if texto_actual:
+                memoria[wa_id]["textos"].append(texto_actual)
+                historial_completo = " | ".join(memoria[wa_id]["textos"])
+                
+                ticket = procesar_con_ia(historial_completo)
+                
+                if not ticket.datos_faltantes:
+                    # Solo creamos el ticket en Trello si es la PRIMERA vez que detectamos todo completo
+                    if "ticket_creado" not in memoria[wa_id]:
+                        if crear_ticket_trello(ticket, memoria[wa_id]["foto"]):
+                            enviar_whatsapp(f"✅ Ticket de {ticket.categoria} creado en {ticket.direccion}.", wa_id)
+                            enviar_whatsapp(ticket.respuesta_usuario, wa_id)
+                            memoria[wa_id]["ticket_creado"] = True 
+                            # No hacemos .pop() acá, dejamos que el usuario pueda decir algo más
+                    else:
+                        # Si el ticket ya se creó, Gemini solo responde al comentario nuevo
+                        enviar_whatsapp(ticket.respuesta_usuario, wa_id)
 
     except Exception as e:
-        print(f"Error Webhook: {e}")
+        print(f"Error General: {e}")
     
     return "OK", 200
 
