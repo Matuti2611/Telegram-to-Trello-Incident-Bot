@@ -342,17 +342,6 @@ def procesar_con_ia(historial: str) -> Optional[TicketData]:
         log.exception("Error llamando a Gemini (historial=%r)", historial)
         return None
 
-    # El parseo manual que ya tenías escrito funciona perfecto
-    # porque `model_validate` sí respeta los defaults de Pydantic.
-    try:
-        raw = json.loads(response.text)
-        if not isinstance(raw, dict):
-            raise ValueError(f"Gemini no devolvió un objeto JSON: {raw!r}")
-        return TicketData.model_validate(raw)
-    except Exception:
-        log.exception("Error parseando JSON de Gemini: %r", getattr(response, "text", None))
-        return None
-
     # Parseo manual tolerante: usamos model_validate, que respeta los defaults
     # de TicketData para claves faltantes. Evita pasarle el Pydantic model al
     # SDK (que rompe con el campo 'default' en el proto Schema).
