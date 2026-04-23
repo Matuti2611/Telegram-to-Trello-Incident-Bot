@@ -30,7 +30,7 @@ class TicketData(BaseModel):
     resumen_operativo: str = Field(description="Resumen corto para el técnico")
     datos_faltantes: list[str] = Field(description="Lista de campos vacíos o faltantes")
     respuesta_usuario: str = Field(description="Mensaje para el usuario")
-    
+    es_charla_casual: bool = Field(description="True si el mensaje es solo un saludo o agradecimiento ('gracias', 'hola'). False si reporta un problema.") 
 # --- FUNCIONES DE SOPORTE ---
 
 def limpiar_numero(number):
@@ -116,8 +116,10 @@ def procesar_con_ia(historial):
     model = genai.GenerativeModel('gemini-2.5-flash-lite')
     prompt = (
         "Sos un asistente de mantenimiento que se llama Claudio. Tu tono es amable y empático. "
-        "REGLA DE ORO: Si la información ya aparece en el historial, NO la pidas de nuevo. "
-        "IMPORTANTE: Debes completar TODOS los campos del JSON. Si no falta nada, datos_faltantes es []. Si falta algún dato, debes pedírselo a la persona.\n"
+        "REGLA DE ORO 1: Si el usuario solo está saludando o agradeciendo (ej: 'gracias', 'buen día'), "
+        "marca 'es_charla_casual' como True, deja 'datos_faltantes' en [], y en 'respuesta_usuario' despedite o saludá cortésmente. "
+        "REGLA DE ORO 2: Si la información ya aparece en el historial, NO la pidas de nuevo. "
+        "IMPORTANTE: Debes completar TODOS los campos del JSON Si no falta nada, datos_faltantes es []. Si falta algún dato, debes pedírselo a la persona.\n"
         "No asumas ningún dato, y si la persona no vive en un edificio, no pongas ni pidas la unidad.\n"
         "- NO asumas direcciones. Si el usuario no dijo Calle y Altura (ej: Pellegrini 1200), "
         "el campo 'direccion' DEBE estar vacío y DEBES poner 'direccion' en 'datos_faltantes'.\n"
@@ -193,20 +195,29 @@ def webhook():
                 ticket = procesar_con_ia(historial_completo)
                 print(f"Gemini respondió: {ticket.resumen_operativo}")
 
-                # Forzamos dirección si es muy corta
-                if len(ticket.direccion.strip()) < 5:
-                    if "direccion" not in ticket.datos_faltantes:
-                        ticket.datos_faltantes.append("direccion")
-
-                if not ticket.datos_faltantes:
-                    print("Intentando crear ticket en Trello...")
-                    if crear_ticket_trello(ticket, memoria[wa_id]["foto"]):
-                        enviar_whatsapp(f"✅ Ticket creado: {ticket.direccion}", wa_id)
-                        enviar_whatsapp(ticket.respuesta_usuario, wa_id)
-                        memoria.pop(wa_id) 
-                else:
-                    print(f"Faltan datos: {ticket.datos_faltantes}")
+                # --- ACÁ EMPIEZA LO QUE PEGAS (EL PASO 3) ---
+                if ticket.es_charla_casual:
                     enviar_whatsapp(ticket.respuesta_usuario, wa_id)
+                    # Si el historial era solo el gracias, lo borramos para que no moleste
+                    if len(memoria[wa_id]["textos"]) == 1:
+                        memoria.pop(wa_id, None)
+                else:
+                    # Forzamos dirección si es muy corta
+                    if len(ticket.direccion.strip()) < 5:
+                        if "direccion" not in ticket.datos_faltantes:
+                            ticket.datos_faltantes.append("direccion")
+
+                    if not ticket.datos_faltantes:
+                        print("Intentando crear ticket en Trello...")
+                        if crear_ticket_trello(ticket, memoria[wa_id]["foto"]):
+                            enviar_whatsapp(f"✅ Ticket creado: {ticket.direccion}", wa_id)
+                            enviar_whatsapp(ticket.respuesta_usuario, wa_id)
+                            # Borramos la memoria porque el ticket ya se creó exitosamente
+                            memoria.pop(wa_id) 
+                    else:
+                        print(f"Faltan datos: {ticket.datos_faltantes}")
+                        enviar_whatsapp(ticket.respuesta_usuario, wa_id)
+                # --- ACÁ TERMINA LO QUE PEGAS ---
 
     except Exception as e:
         print(f"❌ ERROR CRÍTICO EN WEBHOOK: {e}")
