@@ -23,8 +23,8 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # 2. ESQUEMA DE DATOS PARA IA
 class TicketData(BaseModel):
-    direccion: str = Field(description="Dirección física detectada.")
-    unidad: str = Field(description="Depto/Piso o N/A.")
+    direccion: str = Field(description="Dirección de la propiedad o edificio")
+    unidad: str = Field(description="Departamento o unidad. Si es casa, 'N/A'")
     categoria: str = Field(description="Plomeria, Electricidad, Limpieza, Ruidos, Gas, Otros")
     urgencia: str = Field(description="Baja, Media, o Alta")
     resumen_operativo: str = Field(description="Resumen corto para el técnico")
@@ -44,9 +44,10 @@ def enviar_whatsapp(texto, recipient_id):
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     data = {"messaging_product": "whatsapp", "to": target, "type": "text", "text": {"body": texto}}
+    
     res = requests.post(url, json=data, headers=headers)
-    if res.status_code != 200:
-        print(f"❌ Error Envío Meta: {res.text}")
+    
+    print(f"DEBUG ENVÍO: Status {res.status_code} - Resuesta: {res.text}")
 
 def descargar_media_whatsapp(media_id):
     url_info = f"https://graph.facebook.com/v18.0/{media_id}"
@@ -118,6 +119,10 @@ def procesar_con_ia(historial):
         "REGLA DE ORO: Si la información ya aparece en el historial, NO la pidas de nuevo. "
         "IMPORTANTE: Debes completar TODOS los campos del JSON. Si no falta nada, datos_faltantes es []. Si falta algún dato, debes pedírselo a la persona.\n"
         "No asumas ningún dato, y si la persona no vive en un edificio, no pongas ni pidas la unidad.\n"
+        "- NO asumas direcciones. Si el usuario no dijo Calle y Altura (ej: Pellegrini 1200), "
+        "el campo 'direccion' DEBE estar vacío y DEBES poner 'direccion' en 'datos_faltantes'.\n"
+        "- 'piso 5' NO es una dirección, es la unidad. Si solo tenés la unidad, falta la dirección.\n"
+        "- Si el historial es corto o solo hay un saludo, no inventes datos técnicos.\n"
         "Si el usuario hace un comentario después de crear el ticket, confirmá que ya tomaste nota y no reinicies el formulario.\n\n"
         f"HISTORIAL: {historial}"
     )
@@ -145,7 +150,7 @@ def procesar_con_ia(historial):
             urgencia=raw_json.get("urgencia", "Media"),
             resumen_operativo=raw_json.get("resumen_operativo", ""),
             datos_faltantes=raw_json.get("datos_faltantes", []),
-            respuesta_usuario=raw_json.get("respuesta_usuario", "Che, se me mezclaron los cables, ¿me repetís?")
+            respuesta_usuario=raw_json.get("respuesta_usuario", "Se me mezclaron los cables, ¿me repetís?")
         )
 
 # --- WEBHOOK Y MEMORIA ---
@@ -165,6 +170,8 @@ def webhook():
             msg = entry['messages'][0]
             wa_id = msg['from']
             
+            print(f"--- NUEVO MENSAJE DESDE: {wa_id} ---")
+            
             if wa_id not in memoria: memoria[wa_id] = {"textos": [], "foto": None}
             
             texto_actual = ""
@@ -173,32 +180,36 @@ def webhook():
             elif msg['type'] == 'audio':
                 audio = descargar_media_whatsapp(msg['audio']['id'])
                 texto_actual = transcribir_audio(audio)
-                if texto_actual: enviar_whatsapp(f"🎤 Entendí: {texto_actual}", wa_id)
+                print(f"Transcripción: {texto_actual}")
             elif msg['type'] == 'image':
                 memoria[wa_id]["foto"] = descargar_media_whatsapp(msg['image']['id'])
                 texto_actual = msg['image'].get('caption', '')
-                enviar_whatsapp("📸 Foto recibida, che.", wa_id)
 
             if texto_actual:
                 memoria[wa_id]["textos"].append(texto_actual)
                 historial_completo = " | ".join(memoria[wa_id]["textos"])
                 
+                print("Llamando a Gemini...")
                 ticket = procesar_con_ia(historial_completo)
-                
+                print(f"Gemini respondió: {ticket.resumen_operativo}")
+
+                # Forzamos dirección si es muy corta
+                if len(ticket.direccion.strip()) < 5:
+                    if "direccion" not in ticket.datos_faltantes:
+                        ticket.datos_faltantes.append("direccion")
+
                 if not ticket.datos_faltantes:
-                    # Solo creamos el ticket en Trello si es la PRIMERA vez que detectamos todo completo
-                    if "ticket_creado" not in memoria[wa_id]:
-                        if crear_ticket_trello(ticket, memoria[wa_id]["foto"]):
-                            enviar_whatsapp(f"✅ Ticket de {ticket.categoria} creado en {ticket.direccion}.", wa_id)
-                            enviar_whatsapp(ticket.respuesta_usuario, wa_id)
-                            memoria[wa_id]["ticket_creado"] = True 
-                            # No hacemos .pop() acá, dejamos que el usuario pueda decir algo más
-                    else:
-                        # Si el ticket ya se creó, Gemini solo responde al comentario nuevo
+                    print("Intentando crear ticket en Trello...")
+                    if crear_ticket_trello(ticket, memoria[wa_id]["foto"]):
+                        enviar_whatsapp(f"✅ Ticket creado: {ticket.direccion}", wa_id)
                         enviar_whatsapp(ticket.respuesta_usuario, wa_id)
+                        memoria.pop(wa_id) 
+                else:
+                    print(f"Faltan datos: {ticket.datos_faltantes}")
+                    enviar_whatsapp(ticket.respuesta_usuario, wa_id)
 
     except Exception as e:
-        print(f"Error General: {e}")
+        print(f"❌ ERROR CRÍTICO EN WEBHOOK: {e}")
     
     return "OK", 200
 
