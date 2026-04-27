@@ -30,11 +30,14 @@ TRELLO_LIST_ID=
 
 # Procesamiento de Audio
 DEEPGRAM_API_KEY=
+
+# Base de Datos
+DATABASE_URL=
 ```
 ## Instalación
 Instalar python y poner el siguiente comando en la terminal:
 ```
-pip install pyTelegramBotAPI google-generativeai deepgram-sdk streamlit flask python-dotenv pydantic requests
+pip install pyTelegramBotAPI google-generativeai deepgram-sdk streamlit flask python-dotenv pydantic requests prisma
 ```
 
 ## Ejecución
