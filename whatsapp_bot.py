@@ -30,6 +30,8 @@ from dotenv import load_dotenv
 from flask import Flask, abort, request
 from pydantic import BaseModel, Field
 
+import asyncio
+from prisma import Prisma
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -97,7 +99,7 @@ DEDUPE_TTL_SEC = 24 * 60 * 60  # 24 h
 _state_lock = threading.Lock()
 _memoria: dict[str, dict] = {}          # wa_id -> {"textos": [...], "foto": bytes|None, "updated_at": ts}
 _seen_messages: dict[str, float] = {}   # msg_id -> ts
-
+_esperando_id: dict[str, dict] = {}
 
 def _gc_expired_locked() -> None:
     now = time.time()
@@ -237,7 +239,7 @@ def transcribir_audio(audio_bytes: bytes) -> Optional[str]:
 # Trello
 # ---------------------------------------------------------------------------
 
-def crear_ticket_trello(datos: TicketData, foto_bytes: Optional[bytes] = None) -> Optional[str]:
+def crear_ticket_trello(datos: TicketData, foto_bytes: Optional[bytes] = None,cliente_id: str = "Sin ID") -> Optional[str]:
     labels = []
     for clave in (datos.categoria, datos.urgencia):
         label_id = TRELLO_LABELS.get(clave)
@@ -252,6 +254,7 @@ def crear_ticket_trello(datos: TicketData, foto_bytes: Optional[bytes] = None) -
         "idList": TRELLO_LIST_ID,
         "name": f"[{datos.urgencia}] {datos.categoria} - {datos.direccion}",
         "desc": (
+            f"**ID Cliente:** {cliente_id}\n\n" # <--- AGREGAR ESTO AQUÍ
             f"**Unidad:** {datos.unidad}\n\n"
             f"**Descripcion:** {datos.resumen_operativo}\n\n"
             "*Ticket creado por Incident Bot*"
@@ -378,9 +381,9 @@ def procesar_mensaje(msg: dict, wa_id: str) -> None:
         tipo = msg.get("type")
         texto_actual = ""
 
+        # --- EXTRACCIÓN DEL MENSAJE (Original) ---
         if tipo == "text":
             texto_actual = msg["text"]["body"]
-
         elif tipo == "audio":
             audio = descargar_media(msg["audio"]["id"])
             if audio:
@@ -392,13 +395,11 @@ def procesar_mensaje(msg: dict, wa_id: str) -> None:
                 )
                 return
             log.info("Transcripcion (%s): %r", wa_id, texto_actual)
-
         elif tipo == "image":
             foto = descargar_media(msg["image"]["id"])
             if foto:
                 set_foto(wa_id, foto)
             texto_actual = msg["image"].get("caption", "") or "[el usuario envio una foto sin texto]"
-
         else:
             log.info("Tipo de mensaje no soportado: %s", tipo)
             return
@@ -406,6 +407,45 @@ def procesar_mensaje(msg: dict, wa_id: str) -> None:
         if not texto_actual:
             return
 
+        # ---------------------------------------------------------
+        # NUEVO PASO 1: ¿ESTAMOS ESPERANDO UN ID?
+        # ---------------------------------------------------------
+        if wa_id in _esperando_id:
+            # El texto que acaba de llegar es el ID, no se lo mandamos a Gemini
+            nuevo_id = texto_actual.strip()
+            datos_pausados = _esperando_id.pop(wa_id)
+            ticket_pausado = datos_pausados["ticket"]
+            foto_pausada = datos_pausados["foto"]
+
+            # Función para guardar en Prisma
+            async def guardar_nuevo_cliente():
+                db = Prisma()
+                await db.connect()
+                await db.clienteubicacion.create(
+                    data={
+                        "direccion": ticket_pausado.direccion.lower(),
+                        "clienteId": nuevo_id
+                    }
+                )
+                await db.disconnect()
+
+            try:
+                asyncio.run(guardar_nuevo_cliente())
+            except Exception as e:
+                log.error(f"Error guardando en BD: {e}")
+
+            # Mandamos a Trello
+            card_id = crear_ticket_trello(ticket_pausado, foto_pausada, nuevo_id)
+            if card_id:
+                enviar_whatsapp(f"✅ ¡Perfecto! Dirección registrada y ticket cargado en Trello con el ID: {nuevo_id}.", wa_id)
+                clear_memoria(wa_id)
+            else:
+                enviar_whatsapp("Entendí el ID pero falló la creación del ticket en Trello.", wa_id)
+            return
+
+        # ---------------------------------------------------------
+        # PASO 2: FLUJO NORMAL (Va a Gemini)
+        # ---------------------------------------------------------
         append_text(wa_id, texto_actual)
         textos, foto = snapshot(wa_id)
         historial = " | ".join(textos)
@@ -419,7 +459,7 @@ def procesar_mensaje(msg: dict, wa_id: str) -> None:
             )
             return
 
-        # Chequeo deterministico de direccion; el LLM a veces la da por valida aunque falte altura.
+        # Chequeo deterministico de direccion
         if not direccion_parece_valida(ticket.direccion):
             if "direccion" not in ticket.datos_faltantes:
                 ticket.datos_faltantes.append("direccion")
@@ -434,29 +474,60 @@ def procesar_mensaje(msg: dict, wa_id: str) -> None:
             enviar_whatsapp(respuesta, wa_id)
             return
 
-        card_id = crear_ticket_trello(ticket, foto)
-        if card_id:
-            unidad_txt = f" ({ticket.unidad})" if ticket.unidad and ticket.unidad.upper() != "N/A" else ""
-            confirmacion = (
-                f"Listo, tome nota. Te paso el resumen de tu reclamo:\n\n"
-                f"- Categoria: {ticket.categoria}\n"
-                f"- Urgencia: {ticket.urgencia}\n"
-                f"- Direccion: {ticket.direccion}{unidad_txt}\n"
-                f"- Detalle: {ticket.resumen_operativo}\n\n"
-                f"Ya paso al equipo de mantenimiento. Cualquier cambio te aviso por aca."
+        # ---------------------------------------------------------
+        # NUEVO PASO 3: BUSCAR EN LA BASE DE DATOS
+        # ---------------------------------------------------------
+        async def buscar_cliente():
+            db = Prisma()
+            await db.connect()
+            cliente = await db.clienteubicacion.find_unique(
+                where={"direccion": ticket.direccion.lower()}
             )
-            enviar_whatsapp(confirmacion, wa_id)
-            clear_memoria(wa_id)
+            await db.disconnect()
+            return cliente
+
+        try:
+            cliente_encontrado = asyncio.run(buscar_cliente())
+        except Exception as e:
+            log.error(f"Error consultando BD: {e}")
+            cliente_encontrado = None
+
+        # ---------------------------------------------------------
+        # NUEVO PASO 4: DECISIÓN (Crear Ticket o Pedir ID)
+        # ---------------------------------------------------------
+        if cliente_encontrado:
+            # La dirección ya existe, creamos el ticket directo
+            card_id = crear_ticket_trello(ticket, foto, cliente_encontrado.clienteId)
+            if card_id:
+                unidad_txt = f" ({ticket.unidad})" if ticket.unidad and ticket.unidad.upper() != "N/A" else ""
+                confirmacion = (
+                    f"Listo, tome nota. Te paso el resumen de tu reclamo:\n\n"
+                    f"- ID Cliente: {cliente_encontrado.clienteId}\n"
+                    f"- Categoria: {ticket.categoria}\n"
+                    f"- Urgencia: {ticket.urgencia}\n"
+                    f"- Direccion: {ticket.direccion}{unidad_txt}\n"
+                    f"- Detalle: {ticket.resumen_operativo}\n\n"
+                    f"Ya paso al equipo de mantenimiento. Cualquier cambio te aviso por aca."
+                )
+                enviar_whatsapp(confirmacion, wa_id)
+                clear_memoria(wa_id)
+            else:
+                enviar_whatsapp(
+                    "Entendi todo pero fallo la creacion del ticket. "
+                    "Intentalo de nuevo en un momento, por favor.",
+                    wa_id,
+                )
         else:
+            # La dirección NO existe, pausamos el flujo
+            _esperando_id[wa_id] = {"ticket": ticket, "foto": foto}
             enviar_whatsapp(
-                "Entendi todo pero fallo la creacion del ticket. "
-                "Intentalo de nuevo en un momento, por favor.",
-                wa_id,
+                f"📍 Detecté una dirección nueva: *{ticket.direccion}*.\n"
+                f"Por favor, respondeme a este mensaje ÚNICAMENTE con el **ID de Cliente** asociado para registrarlo.", 
+                wa_id
             )
-            # Nota: para reintentos robustos, encolar con RQ/Celery.
+
     except Exception:
         log.exception("Error en procesar_mensaje (%s)", wa_id)
-
 
 # ---------------------------------------------------------------------------
 # Flask
