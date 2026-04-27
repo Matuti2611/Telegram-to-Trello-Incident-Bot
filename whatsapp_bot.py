@@ -239,7 +239,7 @@ def transcribir_audio(audio_bytes: bytes) -> Optional[str]:
 # Trello
 # ---------------------------------------------------------------------------
 
-def crear_ticket_trello(datos: TicketData, foto_bytes: Optional[bytes] = None,cliente_id: str = "Sin ID") -> Optional[str]:
+def crear_ticket_trello(datos: TicketData, foto_bytes: Optional[bytes] = None, cliente_id: str = "Sin ID") -> Optional[str]:
     labels = []
     for clave in (datos.categoria, datos.urgencia):
         label_id = TRELLO_LABELS.get(clave)
@@ -248,13 +248,16 @@ def crear_ticket_trello(datos: TicketData, foto_bytes: Optional[bytes] = None,cl
         else:
             log.warning("Sin label configurada para %r", clave)
 
+    # MODIFICACIÓN: Ponemos el cliente_id al principio del título
+    titulo_con_id = f"[{cliente_id}] [{datos.urgencia}] {datos.categoria} - {datos.direccion}"
+
     query = {
         "key": TRELLO_KEY,
         "token": TRELLO_TOKEN,
         "idList": TRELLO_LIST_ID,
-        "name": f"[{datos.urgencia}] {datos.categoria} - {datos.direccion}",
+        "name": titulo_con_id, # <--- Se usa el nuevo título aquí
         "desc": (
-            f"**ID Cliente:** {cliente_id}\n\n" # <--- AGREGAR ESTO AQUÍ
+            f"**ID Cliente:** {cliente_id}\n\n"
             f"**Unidad:** {datos.unidad}\n\n"
             f"**Descripcion:** {datos.resumen_operativo}\n\n"
             "*Ticket creado por Incident Bot*"
@@ -287,8 +290,6 @@ def crear_ticket_trello(datos: TicketData, foto_bytes: Optional[bytes] = None,cl
             log.exception("No se pudo adjuntar foto al ticket %s", card_id)
 
     return card_id
-
-
 # ---------------------------------------------------------------------------
 # IA
 # ---------------------------------------------------------------------------
