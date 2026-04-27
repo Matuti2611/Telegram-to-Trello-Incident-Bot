@@ -6,7 +6,7 @@ Este proyecto integra bots de mensajería con IA, gestión de tareas en Trello y
 
 ## 🛠️ Configuración Inicial
 
-### 1. Variables de Entorno
+### Variables de Entorno
 Crea un archivo `.env` en el directorio raíz y completa los siguientes campos:
 
 ```env
