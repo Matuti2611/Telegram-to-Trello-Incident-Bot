@@ -20,6 +20,7 @@ TRELLO_KEY = os.getenv("TRELLO_KEY")
 TRELLO_TOKEN = os.getenv("TRELLO_TOKEN")
 TRELLO_LIST_ID = os.getenv("TRELLO_LIST_ID")
 
+@st.cache_data(ttl=60)
 def get_trello_data():
     url = f"https://api.trello.com/1/lists/{TRELLO_LIST_ID}/cards"
     query = {
