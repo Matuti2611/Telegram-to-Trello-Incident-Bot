@@ -30,26 +30,38 @@ TRELLO_LIST_ID=
 
 # Procesamiento de Audio
 DEEPGRAM_API_KEY=
-
-Ademas instalar python y poner el siguiente comando en la terminal:
+```
+# Instalacion
+Instalar python y poner el siguiente comando en la terminal:
+```
 pip install pyTelegramBotAPI google-generativeai deepgram-sdk streamlit flask python-dotenv pydantic requests
+```
 
-Para ejecutar
+#Ejecución
 En una terminal
+```
 ngrok http 5000
+```
 (esto dara una URL que hay que copiar en meta developers)
 
 En otra
+```
 waitress-serve --port=5000 whatsapp_bot:app
+```
 
-Y luego en otra
+# Prender el Bot
 
 # El bot de Telegram
+```
 python bot.py (Para este bot no es necesario ejecutar ni el ngrok ni el waiterss)
+```
 
 # El dashboard
+```
 streamlit run dashboard.py
+```
 
 # El bot de WhatsApp
+```
 python whatsapp_bot.py
-
+```
