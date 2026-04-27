@@ -100,7 +100,7 @@ DEDUPE_TTL_SEC = 24 * 60 * 60  # 24 h
 _state_lock = threading.Lock()
 _memoria: dict[str, dict] = {}          # wa_id -> {"textos": [...], "foto": bytes|None, "updated_at": ts}
 _seen_messages: dict[str, float] = {}   # msg_id -> ts
-_esperando_id: dict[str, dict] = {}
+
 
 
 def _gc_expired_locked() -> None:
@@ -411,49 +411,6 @@ def procesar_mensaje(msg: dict, wa_id: str) -> None:
         if not texto_actual:
             return
 
-        if wa_id in _esperando_id:
-            nuevo_id = texto_actual.strip()
-
-            if nuevo_id.lower() == "cancelar":
-                _esperando_id.pop(wa_id, None)
-                clear_memoria(wa_id)
-                enviar_whatsapp("Ok, cancelé la carga del ticket. Avisame cuando quieras reportar otro problema.", wa_id)
-                return
-
-            if len(nuevo_id) > 10 or " " in nuevo_id:
-                # El texto no parece un ID, el usuario probablemente ignoró el pedido.
-                # Cancelamos el estado de espera y continuamos el flujo normalmente
-                log.info("El texto '%s' no parece un ID. Cancelando espera.", nuevo_id)
-                _esperando_id.pop(wa_id, None)
-            else:
-                datos_pausados = _esperando_id.pop(wa_id)
-                ticket_pausado = datos_pausados["ticket"]
-                foto_pausada = datos_pausados["foto"]
-
-                async def guardar_nuevo_cliente():
-                    db = Prisma()
-                    await db.connect()
-                    await db.clienteubicacion.create(
-                        data={
-                            "direccion": ticket_pausado.direccion,
-                            "clienteId": nuevo_id
-                        }
-                    )
-                    await db.disconnect()
-
-                try:
-                    asyncio.run(guardar_nuevo_cliente())
-                except Exception as e:
-                    log.error(f"Error guardando en BD: {e}")
-
-                card_id = crear_ticket_trello(ticket_pausado, foto_pausada, nuevo_id)
-                if card_id:
-                    enviar_whatsapp(f"✅ ¡Perfecto! Dirección registrada y ticket cargado en Trello con el ID: {nuevo_id}.", wa_id)
-                    clear_memoria(wa_id)
-                else:
-                    enviar_whatsapp("Entendí el ID pero falló la creación del ticket en Trello.", wa_id)
-                return
-
         append_text(wa_id, texto_actual)
         textos, foto = snapshot(wa_id)
         historial = " | ".join(textos)
@@ -519,12 +476,25 @@ def procesar_mensaje(msg: dict, wa_id: str) -> None:
                     wa_id,
                 )
         else:
-            _esperando_id[wa_id] = {"ticket": ticket, "foto": foto}
-            enviar_whatsapp(
-                f"📍 Detecté una dirección nueva: *{ticket.direccion}*.\n"
-                f"Por favor, respondeme a este mensaje ÚNICAMENTE con el **ID de Cliente** asociado para registrarlo.", 
-                wa_id
-            )
+            card_id = crear_ticket_trello(ticket, foto, "Sin ID")
+            if card_id:
+                unidad_txt = f" ({ticket.unidad})" if ticket.unidad and ticket.unidad.upper() != "N/A" else ""
+                confirmacion = (
+                    f"Listo, tome nota. Te paso el resumen de tu reclamo:\n\n"
+                    f"- Categoria: {ticket.categoria}\n"
+                    f"- Urgencia: {ticket.urgencia}\n"
+                    f"- Direccion: {ticket.direccion}{unidad_txt}\n"
+                    f"- Detalle: {ticket.resumen_operativo}\n\n"
+                    f"Ya paso al equipo de mantenimiento. Cualquier cambio te aviso por aca."
+                )
+                enviar_whatsapp(confirmacion, wa_id)
+                clear_memoria(wa_id)
+            else:
+                enviar_whatsapp(
+                    "Entendi todo pero fallo la creacion del ticket. "
+                    "Intentalo de nuevo en un momento, por favor.",
+                    wa_id,
+                )
     except Exception:
         log.exception("Error en procesar_mensaje (%s)", wa_id)
 
