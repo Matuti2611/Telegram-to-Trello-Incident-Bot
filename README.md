@@ -53,8 +53,9 @@ waitress-serve --port=5000 whatsapp_bot:app
 
 # El bot de Telegram
 ```
-python bot.py (Para este bot no es necesario ejecutar ni el ngrok ni el waiterss)
+python bot.py 
 ```
+(Para este bot no son necesarios las dos terminales anteriores)
 
 # El dashboard
 ```
